@@ -1,0 +1,10 @@
+{
+  "name": "mvp-strategy-tool",
+  "version": "1.0.0",
+  "description": "MVP Strategic Planning Tool",
+  "scripts": {
+    "deploy": "vercel --prod"
+  },
+  "author": "Memorial of Converse",
+  "license": "MIT"
+}
