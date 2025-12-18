@@ -2331,11 +2331,6 @@ function renderEnhancedMeasuresTab(mvp) {
 
         const isSelected = selections.measures.includes(measureId);
         const isActivated = measure.is_activated === 'Y';
-
-        // Debug log for activated status
-        if (measureId.includes('321') || measureId.includes('CAHPS')) {
-            console.log(`CAHPS measure check - ID: ${measureId}, is_activated: ${measure.is_activated}, isActivated: ${isActivated}`);
-        }
         const config = measureConfigurations[`${mvp.mvp_id}_${measureId}`] || {};
         const availableTypes = measure.collection_types ? 
             measure.collection_types.split(',').map(t => t.trim()) : ['MIPS CQM'];
@@ -2440,8 +2435,6 @@ function setupFilters() {
         .filter(s => s && s !== 'Unknown')
         .sort();
 
-    console.log('Available specialties from unassigned clinicians:', specialties);
-
     const filterContainer = document.getElementById('filter-container');
     if (!filterContainer) return;
 
@@ -2492,7 +2485,6 @@ function setupFilters() {
         }
         // Add event listener programmatically (more reliable than inline onchange)
         selector.addEventListener('change', function() {
-            console.log('Scenario selector changed to:', this.value);
             loadScenario(this.value);
         });
     }
@@ -2553,14 +2545,9 @@ function renderMVPs() {
     const container = document.getElementById('mvp-cards');
     if (!container) return;
 
-    console.log('=== RENDERING MVPs ===');
-    console.log('Current assignments:', assignments);
-    console.log('Total MVPs available:', mvps.length);
-
     container.innerHTML = '';
 
     const activeMVPs = mvps.filter(mvp => assignments[mvp.mvp_id]?.length > 0);
-    console.log('Active MVPs with assignments:', activeMVPs.map(m => m.mvp_id));
     
     if (activeMVPs.length === 0) {
         container.innerHTML = `
@@ -2723,8 +2710,6 @@ function filterClinicians() {
     const searchTerm = document.getElementById('search-box')?.value.toLowerCase() || '';
     const specialty = document.getElementById('specialty-filter')?.value || '';
 
-    console.log('Filter - Search:', searchTerm, 'Specialty:', specialty);
-
     // Get all assigned clinician NPIs
     const assignedNPIs = new Set();
     Object.values(assignments).forEach(npis => {
@@ -2736,10 +2721,7 @@ function filterClinicians() {
 
     items.forEach(item => {
         const clinician = clinicians.find(c => c.npi === item.dataset.npi);
-        if (!clinician) {
-            console.log('No clinician found for NPI:', item.dataset.npi);
-            return;
-        }
+        if (!clinician) return;
 
         // Hide if already assigned
         const isAssigned = assignedNPIs.has(clinician.npi);
@@ -2758,8 +2740,6 @@ function filterClinicians() {
 
         if (shouldShow) visibleCount++;
     });
-
-    console.log(`Filtered: ${visibleCount} clinicians visible out of ${items.length}`);
 }
 
 function assignSelectedToMVP() {
@@ -2945,12 +2925,6 @@ async function saveScenario() {
             yearly_plan_snapshot: yearlyPlan
         };
 
-        console.log('=== SAVING SCENARIO ===');
-        console.log('Scenario name:', currentScenarioName);
-        console.log('Assignments being saved:', JSON.stringify(assignments));
-        console.log('Selections being saved:', JSON.stringify(mvpSelections));
-        console.log('Number of MVPs with assignments:', Object.keys(assignments).length);
-
         await window.db.saveScenario(
             currentOrganization.id,
             currentScenarioName,
@@ -3009,9 +2983,6 @@ function saveAsNewScenario() {
 }
 
 async function loadScenario(name) {
-    console.log('=== LOADING SCENARIO ===');
-    console.log('Scenario name:', name);
-    console.log('Available scenarios:', Object.keys(savedScenarios));
     if (!name || name === '') return;
 
     if (name === 'new') {
@@ -3040,10 +3011,8 @@ async function loadScenario(name) {
         selectedSpecialties.clear();
         currentMVP = null;
         yearlyPlan = { ...defaultYearlyPlan };
-        console.log('Loaded Default scenario (blank)');
     } else if (savedScenarios[name]) {
         const scenario = savedScenarios[name];
-        console.log('Found scenario in savedScenarios:', scenario);
         currentScenarioName = name;
 
         // Handle both old format (assignments) and new format (assignments_snapshot)
@@ -3054,16 +3023,10 @@ async function loadScenario(name) {
         measureConfigurations = scenario.measureConfigurations || {};
         yearlyPlan = scenario.yearly_plan_snapshot || scenario.yearlyPlan || { ...defaultYearlyPlan };
 
-        console.log('Loaded assignments:', assignments);
-        console.log('Loaded mvpSelections:', mvpSelections);
-        console.log('Loaded measureEstimates:', measureEstimates);
-        console.log('Loaded yearlyPlan:', yearlyPlan);
-
         if (scenario.tinNumber) {
             updateTINNumber(scenario.tinNumber);
         }
     } else {
-        console.log('Scenario not in savedScenarios, trying Supabase...');
         // Try to load from Supabase
         if (currentOrganization) {
             try {
