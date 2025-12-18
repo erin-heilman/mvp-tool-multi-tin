@@ -2945,6 +2945,12 @@ async function saveScenario() {
             yearly_plan_snapshot: yearlyPlan
         };
 
+        console.log('=== SAVING SCENARIO ===');
+        console.log('Scenario name:', currentScenarioName);
+        console.log('Assignments being saved:', JSON.stringify(assignments));
+        console.log('Selections being saved:', JSON.stringify(mvpSelections));
+        console.log('Number of MVPs with assignments:', Object.keys(assignments).length);
+
         await window.db.saveScenario(
             currentOrganization.id,
             currentScenarioName,
@@ -3003,7 +3009,6 @@ function saveAsNewScenario() {
 }
 
 async function loadScenario(name) {
-    alert('loadScenario called with: ' + name);
     console.log('=== LOADING SCENARIO ===');
     console.log('Scenario name:', name);
     console.log('Available scenarios:', Object.keys(savedScenarios));
