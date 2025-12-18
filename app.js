@@ -2996,6 +2996,7 @@ function saveAsNewScenario() {
 }
 
 async function loadScenario(name) {
+    alert('loadScenario called with: ' + name);
     console.log('=== LOADING SCENARIO ===');
     console.log('Scenario name:', name);
     console.log('Available scenarios:', Object.keys(savedScenarios));
