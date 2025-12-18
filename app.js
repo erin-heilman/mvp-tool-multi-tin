@@ -2471,7 +2471,7 @@ function setupFilters() {
         </div>
         <div class="scenario-controls">
             <span style="font-weight: 500; margin-right: 10px;">Scenario:</span>
-            <select id="scenario-selector" onchange="loadScenario(this.value)">
+            <select id="scenario-selector">
                 <option value="Default">Default Scenario</option>
                 ${Object.keys(savedScenarios).map(name =>
                     name !== 'Default' ? `<option value="${name}">${name}</option>` : ''
@@ -2484,10 +2484,17 @@ function setupFilters() {
         </div>
     `;
 
-    // Set the current scenario in the dropdown
+    // Set the current scenario in the dropdown and add event listener
     const selector = document.getElementById('scenario-selector');
-    if (selector && currentScenarioName) {
-        selector.value = currentScenarioName;
+    if (selector) {
+        if (currentScenarioName) {
+            selector.value = currentScenarioName;
+        }
+        // Add event listener programmatically (more reliable than inline onchange)
+        selector.addEventListener('change', function() {
+            console.log('Scenario selector changed to:', this.value);
+            loadScenario(this.value);
+        });
     }
 }
 
