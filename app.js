@@ -2545,10 +2545,15 @@ function renderClinicians() {
 function renderMVPs() {
     const container = document.getElementById('mvp-cards');
     if (!container) return;
-    
+
+    console.log('=== RENDERING MVPs ===');
+    console.log('Current assignments:', assignments);
+    console.log('Total MVPs available:', mvps.length);
+
     container.innerHTML = '';
-    
+
     const activeMVPs = mvps.filter(mvp => assignments[mvp.mvp_id]?.length > 0);
+    console.log('Active MVPs with assignments:', activeMVPs.map(m => m.mvp_id));
     
     if (activeMVPs.length === 0) {
         container.innerHTML = `
@@ -2991,7 +2996,9 @@ function saveAsNewScenario() {
 }
 
 async function loadScenario(name) {
-    console.log('Loading scenario:', name);
+    console.log('=== LOADING SCENARIO ===');
+    console.log('Scenario name:', name);
+    console.log('Available scenarios:', Object.keys(savedScenarios));
     if (!name || name === '') return;
 
     if (name === 'new') {
@@ -3020,8 +3027,10 @@ async function loadScenario(name) {
         selectedSpecialties.clear();
         currentMVP = null;
         yearlyPlan = { ...defaultYearlyPlan };
+        console.log('Loaded Default scenario (blank)');
     } else if (savedScenarios[name]) {
         const scenario = savedScenarios[name];
+        console.log('Found scenario in savedScenarios:', scenario);
         currentScenarioName = name;
 
         // Handle both old format (assignments) and new format (assignments_snapshot)
@@ -3032,10 +3041,16 @@ async function loadScenario(name) {
         measureConfigurations = scenario.measureConfigurations || {};
         yearlyPlan = scenario.yearly_plan_snapshot || scenario.yearlyPlan || { ...defaultYearlyPlan };
 
+        console.log('Loaded assignments:', assignments);
+        console.log('Loaded mvpSelections:', mvpSelections);
+        console.log('Loaded measureEstimates:', measureEstimates);
+        console.log('Loaded yearlyPlan:', yearlyPlan);
+
         if (scenario.tinNumber) {
             updateTINNumber(scenario.tinNumber);
         }
     } else {
+        console.log('Scenario not in savedScenarios, trying Supabase...');
         // Try to load from Supabase
         if (currentOrganization) {
             try {
