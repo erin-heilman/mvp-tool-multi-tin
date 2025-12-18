@@ -1,5 +1,5 @@
-// MVP Strategic Planning Tool - PROFESSIONAL VERSION WITH ALL FIXES
-console.log('MVP Tool Starting - Professional Version with Corrected Functionality...');
+// MVP Strategic Planning Tool - SUPABASE COLLABORATIVE VERSION
+console.log('MVP Tool Starting - Supabase Collaborative Version...');
 
 // Configuration
 const SHEET_ID = '1CHs8cP3mDQkwG-XL-B7twFVukRxcB4umn9VX9ZK2VqM';
@@ -17,21 +17,29 @@ let currentMVP = null;
 let currentMode = 'tin-analysis';
 let savedScenarios = {};
 let currentScenarioName = 'Default';
-let currentTIN = 'main'; // Multi-TIN support: 'main' or 'medical'
+let currentTIN = null; // Will be set from Supabase organization ID
+let currentOrganization = null; // Current organization object
 
 // New state for enhanced features
 let selectedSpecialties = new Set();
 let measureEstimates = {};
 let measureConfigurations = {};
 let yearlyPlan = {
-    2025: { mvps: [], measures: [], focus: 'Foundation - High readiness measures' },
-    2026: { mvps: [], measures: [], focus: 'Expansion - Add specialty MVPs' },
-    2027: { mvps: [], measures: [], focus: 'Integration - Cross-specialty coordination' },
-    2028: { mvps: [], measures: [], focus: 'Optimization - Performance improvement' },
-    2029: { mvps: [], measures: [], focus: 'Excellence - Full MVP implementation' }
+    2026: { mvps: [], measures: [], focus: 'Foundation - High readiness measures' },
+    2027: { mvps: [], measures: [], focus: 'Expansion - Add specialty MVPs' },
+    2028: { mvps: [], measures: [], focus: 'Integration - Cross-specialty coordination' },
+    2029: { mvps: [], measures: [], focus: 'Optimization - Performance improvement' },
+    2030: { mvps: [], measures: [], focus: 'Excellence - Full MVP implementation' }
 };
-let currentYear = 2025;
-let globalTINNumber = '123456789'; // Default TIN, will be updated from sheet
+let currentYear = 2026;
+let globalTINNumber = '123456789'; // Default TIN, will be updated from database
+
+// Supabase User State
+let currentUser = null;
+let organizations = [];
+let activeUsers = [];
+let saveTimeout = null;
+let isSaving = false;
 
 // MVP recommendations based on specialty
 const mvpRecommendations = {
@@ -51,47 +59,605 @@ const mvpRecommendations = {
     'Nephrology': 'Kidney Care MVP'
 };
 
+// ============================================================================
+// USER IDENTITY & INITIALIZATION
+// ============================================================================
+
+// Check for saved user identity
+function checkUserIdentity() {
+    const savedUser = localStorage.getItem('mvp_user');
+    if (savedUser) {
+        try {
+            return JSON.parse(savedUser);
+        } catch (e) {
+            return null;
+        }
+    }
+    return null;
+}
+
+// Show user identity modal
+function showIdentityModal() {
+    const modal = document.getElementById('identity-modal');
+    if (modal) {
+        modal.style.display = 'flex';
+
+        // Enable/disable submit button based on input
+        const nameInput = document.getElementById('user-name');
+        const emailInput = document.getElementById('user-email');
+        const submitBtn = document.getElementById('identity-submit');
+
+        function validateInputs() {
+            const nameValid = nameInput.value.trim().length >= 2;
+            const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailInput.value.trim());
+            submitBtn.disabled = !(nameValid && emailValid);
+        }
+
+        nameInput.addEventListener('input', validateInputs);
+        emailInput.addEventListener('input', validateInputs);
+
+        // Allow Enter key to submit
+        emailInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter' && !submitBtn.disabled) {
+                submitUserIdentity();
+            }
+        });
+    }
+}
+
+// Submit user identity
+async function submitUserIdentity() {
+    const nameInput = document.getElementById('user-name');
+    const emailInput = document.getElementById('user-email');
+
+    const name = nameInput.value.trim();
+    const email = emailInput.value.trim();
+
+    if (!name || !email) {
+        alert('Please enter your name and email');
+        return;
+    }
+
+    const statusEl = document.getElementById('connection-status');
+    statusEl.textContent = 'Setting up your account...';
+    statusEl.className = 'status-loading';
+    statusEl.style.display = 'block';
+
+    try {
+        // Create or get user in Supabase
+        currentUser = await window.db.getOrCreateUser(email, name);
+
+        // Save to localStorage for future sessions
+        localStorage.setItem('mvp_user', JSON.stringify({
+            id: currentUser.id,
+            email: currentUser.email,
+            display_name: currentUser.display_name
+        }));
+
+        // Hide modal
+        const modal = document.getElementById('identity-modal');
+        if (modal) {
+            modal.style.display = 'none';
+        }
+
+        // Update UI with user info
+        updateUserInfoDisplay();
+
+        // Continue with app initialization
+        await initializeApp();
+
+    } catch (error) {
+        console.error('Error creating user:', error);
+        statusEl.textContent = `Error: ${error.message}. Please try again.`;
+        statusEl.className = 'status-error';
+    }
+}
+
+// Update user info display in header
+function updateUserInfoDisplay() {
+    const userInfo = document.getElementById('user-info');
+    const userAvatar = document.getElementById('user-avatar');
+    const userNameDisplay = document.getElementById('user-name-display');
+
+    if (currentUser && userInfo) {
+        userInfo.style.display = 'flex';
+
+        // Set avatar to first letter of name
+        const initials = currentUser.display_name
+            .split(' ')
+            .map(n => n[0])
+            .join('')
+            .toUpperCase()
+            .slice(0, 2);
+
+        if (userAvatar) userAvatar.textContent = initials;
+        if (userNameDisplay) userNameDisplay.textContent = currentUser.display_name;
+    }
+}
+
+// Update active users display
+function updateActiveUsersDisplay() {
+    const countEl = document.getElementById('active-users-count');
+    if (countEl && activeUsers) {
+        const count = activeUsers.length;
+        countEl.textContent = `${count} online`;
+    }
+}
+
+// Wait for Supabase to be ready
+async function waitForSupabase(maxAttempts = 20) {
+    for (let i = 0; i < maxAttempts; i++) {
+        // Try to initialize
+        if (window.initializeSupabase) {
+            window.initializeSupabase();
+        }
+
+        if (window.supabaseClient) {
+            console.log('Supabase ready after', i, 'attempts');
+            return true;
+        }
+
+        // Wait 100ms before trying again
+        await new Promise(resolve => setTimeout(resolve, 100));
+    }
+
+    console.error('Supabase failed to initialize after', maxAttempts, 'attempts');
+    return false;
+}
+
 // Initialize the application
 async function init() {
-    console.log('Initializing Professional MVP tool...');
+    console.log('Initializing Supabase Collaborative MVP tool...');
+    const statusEl = document.getElementById('connection-status');
+
+    // Wait for Supabase to be ready
+    statusEl.textContent = 'Connecting to database...';
+    statusEl.className = 'status-loading';
+
+    const supabaseReady = await waitForSupabase();
+    if (!supabaseReady) {
+        statusEl.textContent = 'Error: Could not connect to database. Please refresh.';
+        statusEl.className = 'status-error';
+        return;
+    }
+
+    // Check if user is already identified
+    const savedUser = checkUserIdentity();
+
+    if (savedUser) {
+        // Verify user still exists in database and refresh
+        try {
+            statusEl.textContent = 'Reconnecting...';
+            statusEl.className = 'status-loading';
+
+            currentUser = await window.db.getOrCreateUser(savedUser.email, savedUser.display_name);
+            updateUserInfoDisplay();
+            await initializeApp();
+        } catch (error) {
+            console.error('Error reconnecting user:', error);
+            // Clear saved user and show identity modal
+            localStorage.removeItem('mvp_user');
+            showIdentityModal();
+        }
+    } else {
+        // Show identity modal for new users
+        showIdentityModal();
+    }
+}
+
+// Main app initialization (called after user identity is confirmed)
+async function initializeApp() {
+    console.log('Initializing app with user:', currentUser?.display_name);
     const statusEl = document.getElementById('connection-status');
 
     try {
-        // Load saved TIN preference
-        const savedTIN = localStorage.getItem('mvp_current_tin');
-        if (savedTIN) {
-            currentTIN = savedTIN;
-            console.log('Loaded saved TIN:', currentTIN);
-        }
-
-        statusEl.textContent = 'Loading data from Google Sheets...';
+        statusEl.textContent = 'Loading data from Supabase...';
         statusEl.className = 'status-loading';
 
-        await loadData();
-        
+        // Load organizations
+        await loadOrganizations();
+
+        // Load reference data (MVPs, measures, benchmarks)
+        await loadReferenceData();
+
+        // If we have an organization selected, load its data
+        if (currentOrganization) {
+            await loadOrganizationData();
+
+            // Subscribe to real-time updates
+            setupRealtimeSubscriptions();
+
+            // Update user presence
+            if (currentUser) {
+                await window.db.updateUserPresence(currentUser.id, currentOrganization.id, currentUser.display_name, currentMode);
+
+                // Refresh active users
+                activeUsers = await window.db.getActiveUsers(currentOrganization.id);
+                updateActiveUsersDisplay();
+            }
+        }
+
         statusEl.textContent = `Connected! Loaded ${clinicians.length} clinicians and ${mvps.length} MVPs`;
         statusEl.className = 'status-success';
-        
-        setTimeout(() => {
-            statusEl.style.display = 'none';
-            document.getElementById('nav-tabs').style.display = 'block';
-        }, 3000);
-        
+
+        // Show the app immediately
+        document.getElementById('nav-tabs').style.display = 'block';
         document.getElementById('main-app').style.display = 'block';
 
-        loadSavedScenarios();
-        loadTINSpecificData();
+        // Hide status after 2 seconds
+        setTimeout(() => {
+            statusEl.style.display = 'none';
+        }, 2000);
+
         setupInterface();
         switchToMode('tin-analysis');
 
-        // Initialize TIN selector UI
-        updateTINSelectorUI();
-        
+        // Start presence heartbeat
+        startPresenceHeartbeat();
+
     } catch (error) {
         console.error('Initialization error:', error);
         statusEl.textContent = `Error: ${error.message}. Please refresh the page.`;
         statusEl.className = 'status-error';
+
+        // Still show the app so user can try to add an organization
+        document.getElementById('nav-tabs').style.display = 'block';
+        document.getElementById('main-app').style.display = 'block';
+        setupInterface();
     }
+}
+
+// Presence heartbeat - update every 30 seconds
+let presenceInterval = null;
+function startPresenceHeartbeat() {
+    if (presenceInterval) clearInterval(presenceInterval);
+
+    presenceInterval = setInterval(async () => {
+        if (currentUser && currentOrganization) {
+            try {
+                await window.db.updateUserPresence(
+                    currentUser.id,
+                    currentOrganization.id,
+                    currentUser.display_name,
+                    currentMode
+                );
+
+                // Refresh active users list
+                activeUsers = await window.db.getActiveUsers(currentOrganization.id);
+                updateActiveUsersDisplay();
+            } catch (e) {
+                console.error('Presence update failed:', e);
+            }
+        }
+    }, 30000);
+}
+
+// Load organizations from Supabase
+async function loadOrganizations() {
+    try {
+        organizations = await window.db.getOrganizations();
+        console.log(`Loaded ${organizations.length} organizations`);
+
+        // Populate TIN selector
+        const selector = document.getElementById('tin-selector');
+        if (selector) {
+            selector.innerHTML = '';
+
+            if (organizations.length === 0) {
+                selector.innerHTML = '<option value="">No organizations yet - Add one!</option>';
+            } else {
+                organizations.forEach(org => {
+                    const option = document.createElement('option');
+                    option.value = org.id;
+                    option.textContent = org.display_name || org.name;
+                    selector.appendChild(option);
+                });
+
+                // Select first org or saved preference
+                const savedOrgId = localStorage.getItem('mvp_current_org');
+                if (savedOrgId && organizations.find(o => o.id === savedOrgId)) {
+                    selector.value = savedOrgId;
+                    currentOrganization = organizations.find(o => o.id === savedOrgId);
+                } else if (organizations.length > 0) {
+                    currentOrganization = organizations[0];
+                    selector.value = currentOrganization.id;
+                }
+
+                currentTIN = currentOrganization?.id;
+                globalTINNumber = currentOrganization?.tin || '';
+
+                updateTINSelectorUI();
+            }
+        }
+    } catch (error) {
+        console.error('Error loading organizations:', error);
+        throw error;
+    }
+}
+
+// Load reference data from Google Sheets (or Supabase as fallback)
+async function loadReferenceData() {
+    const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+
+    try {
+        if (isLocalhost) {
+            // On localhost, use Supabase seed data
+            console.log('Loading reference data from Supabase (localhost)...');
+            mvps = await window.db.getMVPs();
+            measures = await window.db.getMeasures();
+            benchmarks = await window.db.getBenchmarks();
+        } else {
+            // On deployed site, load from Google Sheets
+            console.log('Loading reference data from Google Sheets...');
+
+            // Load MVPs from Google Sheets
+            const mvpResponse = await fetch('/api/sheets/mvps');
+            if (mvpResponse.ok) {
+                const rawMvps = await mvpResponse.json();
+                mvps = rawMvps.map(row => ({
+                    mvp_id: row.mvp_id || row['MVP ID'] || '',
+                    mvp_name: row.mvp_name || row['MVP Name'] || '',
+                    description: row.description || row['Description'] || '',
+                    eligible_specialties: row.eligible_specialties || row['Eligible Specialties'] || '',
+                    available_measures: row.available_measures || row['Available Measures'] || '',
+                    category: row.category || row['Category'] || 'General'
+                }));
+                console.log(`Loaded ${mvps.length} MVPs from Google Sheets`);
+            } else {
+                console.warn('Failed to load MVPs from Sheets, falling back to Supabase');
+                mvps = await window.db.getMVPs();
+            }
+
+            // Load Measures from Google Sheets
+            const measuresResponse = await fetch('/api/sheets/measures');
+            if (measuresResponse.ok) {
+                const rawMeasures = await measuresResponse.json();
+                measures = rawMeasures.map(row => {
+                    // Normalize is_activated to 'Y' or 'N' for consistency
+                    const activatedRaw = row.is_activated || row['Is Activated'] || row['Activated'] || '';
+                    const isActivated = activatedRaw === 'Y' || activatedRaw === 'Yes' || activatedRaw === 'yes' ||
+                                       activatedRaw === 'true' || activatedRaw === 'TRUE' || activatedRaw === true ||
+                                       activatedRaw === '1' || activatedRaw === 1;
+
+                    // Normalize is_inverse similarly
+                    const inverseRaw = row.is_inverse || row['Is Inverse'] || row['Inverse'] || '';
+                    const isInverse = inverseRaw === 'Y' || inverseRaw === 'Yes' || inverseRaw === 'yes' ||
+                                     inverseRaw === 'true' || inverseRaw === 'TRUE' || inverseRaw === true;
+
+                    return {
+                        measure_id: row.measure_id || row['Measure ID'] || '',
+                        measure_name: row.measure_name || row['Measure Name'] || '',
+                        measure_type: row.measure_type || row['Measure Type'] || row['Type'] || 'Quality',
+                        is_inverse: isInverse ? 'Y' : 'N',
+                        is_activated: isActivated ? 'Y' : 'N',
+                        collection_types: row.collection_types || row['Collection Types'] || 'eCQM',
+                        setup_months: parseInt(row.setup_months || row['Setup Months'] || '0') || 0,
+                        description: row.description || row['Description'] || ''
+                    };
+                });
+                console.log(`Loaded ${measures.length} measures from Google Sheets`);
+
+                // Log activated measures for debugging
+                const activatedCount = measures.filter(m => m.is_activated === 'Y').length;
+                console.log(`Found ${activatedCount} activated measures`);
+            } else {
+                console.warn('Failed to load measures from Sheets, falling back to Supabase');
+                measures = await window.db.getMeasures();
+            }
+
+            // Load Benchmarks from Google Sheets
+            const benchmarksResponse = await fetch('/api/sheets/benchmarks');
+            if (benchmarksResponse.ok) {
+                const rawBenchmarks = await benchmarksResponse.json();
+                benchmarks = rawBenchmarks.map(row => ({
+                    measure_id: row.measure_id || row['Measure ID'] || '',
+                    benchmark_year: row.benchmark_year || row['Benchmark Year'] || '2024',
+                    decile_3: parseFloat(row.decile_3 || row['Decile 3'] || '0') || 0,
+                    decile_4: parseFloat(row.decile_4 || row['Decile 4'] || '0') || 0,
+                    decile_5: parseFloat(row.decile_5 || row['Decile 5'] || '0') || 0,
+                    decile_6: parseFloat(row.decile_6 || row['Decile 6'] || '0') || 0,
+                    decile_7: parseFloat(row.decile_7 || row['Decile 7'] || '0') || 0,
+                    decile_8: parseFloat(row.decile_8 || row['Decile 8'] || '0') || 0,
+                    decile_9: parseFloat(row.decile_9 || row['Decile 9'] || '0') || 0,
+                    decile_10: parseFloat(row.decile_10 || row['Decile 10'] || '0') || 0
+                }));
+                console.log(`Loaded ${benchmarks.length} benchmarks from Google Sheets`);
+            } else {
+                console.warn('Failed to load benchmarks from Sheets, falling back to Supabase');
+                benchmarks = await window.db.getBenchmarks();
+            }
+        }
+
+        console.log(`Loaded ${mvps.length} MVPs, ${measures.length} measures, ${benchmarks.length} benchmarks`);
+
+        // Update measures with benchmark medians
+        measures.forEach(measure => {
+            const benchmark = benchmarks.find(b => b.measure_id === measure.measure_id);
+            if (benchmark) {
+                measure.median_benchmark = benchmark.decile_5 || benchmark.median_performance || 75;
+            }
+        });
+
+        updateStats();
+    } catch (error) {
+        console.error('Error loading reference data:', error);
+        throw error;
+    }
+}
+
+// Load organization-specific data
+async function loadOrganizationData() {
+    if (!currentOrganization) return;
+
+    const orgId = currentOrganization.id;
+    console.log('Loading data for organization:', currentOrganization.name);
+
+    try {
+        // Load clinicians for this organization
+        clinicians = await window.db.getClinicians(orgId);
+        console.log(`Loaded ${clinicians.length} clinicians`);
+
+        // Load assignments
+        const dbAssignments = await window.db.getAssignments(orgId);
+        assignments = {};
+        dbAssignments.forEach(a => {
+            if (!assignments[a.mvp_id]) {
+                assignments[a.mvp_id] = [];
+            }
+            assignments[a.mvp_id].push(a.clinician_npi);
+        });
+        console.log(`Loaded ${dbAssignments.length} assignments`);
+
+        // Load MVP selections
+        const dbSelections = await window.db.getMvpSelections(orgId);
+        mvpSelections = {};
+        dbSelections.forEach(s => {
+            if (!mvpSelections[s.mvp_id]) {
+                mvpSelections[s.mvp_id] = { measures: [], configs: {} };
+            }
+            mvpSelections[s.mvp_id].measures.push(s.measure_id);
+            mvpSelections[s.mvp_id].configs[s.measure_id] = {
+                collectionType: s.collection_type,
+                ...s.config
+            };
+        });
+        console.log(`Loaded selections for ${Object.keys(mvpSelections).length} MVPs`);
+
+        // Load measure estimates
+        const dbEstimates = await window.db.getMeasureEstimates(orgId);
+        measureEstimates = {};
+        dbEstimates.forEach(e => {
+            measureEstimates[`${e.mvp_id}_${e.measure_id}`] = e.estimated_rate;
+        });
+        console.log(`Loaded ${dbEstimates.length} measure estimates`);
+
+        // Load scenarios
+        const dbScenarios = await window.db.getScenarios(orgId);
+        savedScenarios = {};
+        dbScenarios.forEach(s => {
+            savedScenarios[s.name] = s;
+        });
+        console.log(`Loaded ${dbScenarios.length} scenarios`);
+
+        updateStats();
+
+    } catch (error) {
+        console.error('Error loading organization data:', error);
+        throw error;
+    }
+}
+
+// Setup real-time subscriptions for collaboration
+function setupRealtimeSubscriptions() {
+    if (!currentOrganization) return;
+
+    window.db.subscribeToChanges(currentOrganization.id, (table, payload) => {
+        console.log('Real-time update:', table, payload.eventType);
+
+        switch (table) {
+            case 'assignments':
+                handleAssignmentChange(payload);
+                break;
+            case 'mvp_selections':
+                handleSelectionChange(payload);
+                break;
+            case 'measure_estimates':
+                handleEstimateChange(payload);
+                break;
+            case 'scenarios':
+                handleScenarioChange(payload);
+                break;
+            case 'user_presence':
+                handlePresenceChange(payload);
+                break;
+        }
+    });
+}
+
+// Handle real-time assignment changes
+function handleAssignmentChange(payload) {
+    const { eventType, new: newData, old: oldData } = payload;
+
+    if (eventType === 'INSERT' && newData) {
+        if (!assignments[newData.mvp_id]) {
+            assignments[newData.mvp_id] = [];
+        }
+        if (!assignments[newData.mvp_id].includes(newData.clinician_npi)) {
+            assignments[newData.mvp_id].push(newData.clinician_npi);
+        }
+    } else if (eventType === 'DELETE' && oldData) {
+        if (assignments[oldData.mvp_id]) {
+            assignments[oldData.mvp_id] = assignments[oldData.mvp_id].filter(
+                npi => npi !== oldData.clinician_npi
+            );
+        }
+    }
+
+    // Refresh UI
+    if (currentMode === 'planning') {
+        renderPlanningMode();
+    }
+    updateStats();
+}
+
+// Handle real-time selection changes
+function handleSelectionChange(payload) {
+    const { eventType, new: newData, old: oldData } = payload;
+
+    if (eventType === 'INSERT' && newData) {
+        if (!mvpSelections[newData.mvp_id]) {
+            mvpSelections[newData.mvp_id] = { measures: [], configs: {} };
+        }
+        if (!mvpSelections[newData.mvp_id].measures.includes(newData.measure_id)) {
+            mvpSelections[newData.mvp_id].measures.push(newData.measure_id);
+            mvpSelections[newData.mvp_id].configs[newData.measure_id] = {
+                collectionType: newData.collection_type,
+                ...newData.config
+            };
+        }
+    } else if (eventType === 'DELETE' && oldData) {
+        if (mvpSelections[oldData.mvp_id]) {
+            mvpSelections[oldData.mvp_id].measures = mvpSelections[oldData.mvp_id].measures.filter(
+                m => m !== oldData.measure_id
+            );
+            delete mvpSelections[oldData.mvp_id].configs[oldData.measure_id];
+        }
+    }
+
+    // Refresh UI
+    if (currentMVP) {
+        renderMeasures(currentMVP);
+    }
+}
+
+// Handle real-time estimate changes
+function handleEstimateChange(payload) {
+    const { eventType, new: newData } = payload;
+
+    if ((eventType === 'INSERT' || eventType === 'UPDATE') && newData) {
+        measureEstimates[`${newData.mvp_id}_${newData.measure_id}`] = newData.estimated_rate;
+    }
+
+    // Refresh performance view if active
+    if (currentMode === 'performance') {
+        renderPerformanceEstimation();
+    }
+}
+
+// Handle real-time scenario changes
+function handleScenarioChange(payload) {
+    // Reload scenarios
+    loadOrganizationData().then(() => {
+        updateScenarioDropdown();
+    });
+}
+
+// Handle real-time presence changes
+function handlePresenceChange(payload) {
+    window.db.getActiveUsers(currentOrganization.id).then(users => {
+        activeUsers = users;
+        updateActiveUsersDisplay();
+    });
 }
 
 // Load data from API with proper benchmark loading
@@ -262,13 +828,199 @@ async function loadData() {
     updateStats();
 }
 
+// Show CSV import modal
+function showCSVImportModal() {
+    // Create a simple file input dialog
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.csv';
+
+    input.onchange = async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        const statusEl = document.getElementById('connection-status');
+        statusEl.textContent = 'Processing CSV file...';
+        statusEl.className = 'status-loading';
+        statusEl.style.display = 'block';
+
+        try {
+            const text = await file.text();
+            const lines = text.split('\n');
+            const headers = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
+
+            const cliniciansData = [];
+            for (let i = 1; i < lines.length; i++) {
+                const values = lines[i].split(',').map(v => v.trim().replace(/"/g, ''));
+                if (values.length >= 2) {
+                    const row = {};
+                    headers.forEach((h, idx) => {
+                        row[h] = values[idx] || '';
+                    });
+                    cliniciansData.push(row);
+                }
+            }
+
+            if (cliniciansData.length === 0) {
+                alert('No valid data found in CSV');
+                statusEl.style.display = 'none';
+                return;
+            }
+
+            // Import to Supabase
+            const imported = await window.db.importClinicians(currentOrganization.id, cliniciansData, currentUser?.id);
+            console.log(`Imported ${imported.length} clinicians from CSV`);
+
+            // Reload clinicians
+            clinicians = await window.db.getClinicians(currentOrganization.id);
+
+            // Refresh UI
+            renderTINAnalysis();
+            updateStats();
+
+            statusEl.textContent = `Imported ${imported.length} clinicians from CSV!`;
+            statusEl.className = 'status-success';
+            setTimeout(() => {
+                statusEl.style.display = 'none';
+            }, 2000);
+
+        } catch (error) {
+            console.error('Error importing CSV:', error);
+            statusEl.textContent = `Error: ${error.message}`;
+            statusEl.className = 'status-error';
+        }
+    };
+
+    input.click();
+}
+
+// Sample clinician data for local testing
+const sampleClinicians = [
+    { npi: '1234567890', name: 'Dr. Sarah Johnson', specialty: 'Family Practice', separate_ehr: 'No' },
+    { npi: '1234567891', name: 'Dr. Michael Chen', specialty: 'Internal Medicine', separate_ehr: 'No' },
+    { npi: '1234567892', name: 'Dr. Emily Williams', specialty: 'Cardiology', separate_ehr: 'No' },
+    { npi: '1234567893', name: 'Dr. James Brown', specialty: 'Family Practice', separate_ehr: 'No' },
+    { npi: '1234567894', name: 'Dr. Maria Garcia', specialty: 'Pediatrics', separate_ehr: 'No' },
+    { npi: '1234567895', name: 'Dr. Robert Davis', specialty: 'Internal Medicine', separate_ehr: 'No' },
+    { npi: '1234567896', name: 'Dr. Jennifer Martinez', specialty: 'Cardiology', separate_ehr: 'Yes' },
+    { npi: '1234567897', name: 'Dr. David Wilson', specialty: 'Orthopedics', separate_ehr: 'No' },
+    { npi: '1234567898', name: 'Dr. Lisa Anderson', specialty: 'Family Practice', separate_ehr: 'No' },
+    { npi: '1234567899', name: 'Dr. Thomas Taylor', specialty: 'Gastroenterology', separate_ehr: 'No' },
+    { npi: '1234567900', name: 'Dr. Nancy Moore', specialty: 'Rheumatology', separate_ehr: 'No' },
+    { npi: '1234567901', name: 'Dr. Christopher Lee', specialty: 'Internal Medicine', separate_ehr: 'No' },
+];
+
+// Import clinicians from Google Sheets API (or sample data for localhost)
+async function importCliniciansFromSheets() {
+    if (!currentOrganization) {
+        alert('Please select an organization first');
+        return;
+    }
+
+    const statusEl = document.getElementById('connection-status');
+    statusEl.textContent = 'Importing clinicians...';
+    statusEl.className = 'status-loading';
+    statusEl.style.display = 'block';
+
+    try {
+        let cliniciansData = [];
+
+        // Check if we're on localhost (API won't work)
+        const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+
+        if (isLocalhost) {
+            console.log('Running locally - using sample clinician data');
+            cliniciansData = sampleClinicians;
+        } else {
+            // Determine which TIN to fetch based on org name
+            let sheetTIN = 'main';
+            const orgNameLower = currentOrganization.name.toLowerCase();
+            if (orgNameLower.includes('medical group') || orgNameLower.includes('medical')) {
+                sheetTIN = 'medical';
+            }
+
+            console.log(`Fetching clinicians from Google Sheets for TIN: ${sheetTIN}`);
+            const response = await fetch(`/api/sheets/clinicians?tin=${sheetTIN}`);
+
+            if (!response.ok) {
+                throw new Error(`Failed to fetch clinicians: ${response.status}`);
+            }
+
+            const rawData = await response.json();
+            console.log(`Fetched ${rawData.length} clinicians from Google Sheets`);
+
+            // Transform to the format expected by importClinicians
+            cliniciansData = rawData.map(row => ({
+                npi: row.npi || row.NPI || '',
+                name: row['first_name'] && row['last_name']
+                    ? `${row['first_name']} ${row['last_name']}`.trim()
+                    : row['First Name'] && row['Last Name']
+                        ? `${row['First Name']} ${row['Last Name']}`.trim()
+                        : row.name || row.Name || 'Unknown',
+                specialty: row.specialty || row.Specialty || 'Unknown',
+                separate_ehr: row.separate_ehr || row['Separate EHR'] || 'No'
+            }));
+        }
+
+        if (cliniciansData.length === 0) {
+            alert('No clinicians found');
+            statusEl.style.display = 'none';
+            return;
+        }
+
+        // Import to Supabase
+        const imported = await window.db.importClinicians(currentOrganization.id, cliniciansData, currentUser?.id);
+        console.log(`Imported ${imported.length} clinicians to Supabase`);
+
+        // Reload clinicians
+        clinicians = await window.db.getClinicians(currentOrganization.id);
+
+        // Refresh UI
+        renderTINAnalysis();
+        updateStats();
+
+        statusEl.textContent = `Imported ${imported.length} clinicians!`;
+        statusEl.className = 'status-success';
+        setTimeout(() => {
+            statusEl.style.display = 'none';
+        }, 2000);
+
+    } catch (error) {
+        console.error('Error importing clinicians:', error);
+        statusEl.textContent = `Error: ${error.message}`;
+        statusEl.className = 'status-error';
+    }
+}
+
 // TIN Analysis Functions
 function renderTINAnalysis() {
     console.log('Rendering TIN Analysis...');
-    
+
+    // Show import button if no clinicians
+    const specialtyGrid = document.getElementById('specialty-grid');
+    if (clinicians.length === 0) {
+        specialtyGrid.innerHTML = `
+            <div style="grid-column: 1/-1; text-align: center; padding: 40px; background: white; border-radius: 8px; border: 2px dashed #dee2e6;">
+                <h3 style="color: #586069; margin-bottom: 15px;">No Clinicians Found</h3>
+                <p style="color: #586069; margin-bottom: 20px;">This organization doesn't have any clinicians yet.</p>
+                <button onclick="importCliniciansFromSheets()" style="padding: 12px 24px; background: #004877; color: white; border: none; cursor: pointer; font-size: 16px; margin-right: 10px;">
+                    Import from Google Sheets
+                </button>
+                <button onclick="showCSVImportModal()" style="padding: 12px 24px; background: #28a745; color: white; border: none; cursor: pointer; font-size: 16px;">
+                    Upload CSV File
+                </button>
+            </div>
+        `;
+
+        document.getElementById('tin-total').textContent = '0';
+        document.getElementById('tin-specialties').textContent = '0';
+        document.getElementById('tin-mvps').textContent = '0';
+        return;
+    }
+
     const specialtyCount = {};
     const specialtyClinicians = {};
-    
+
     clinicians.forEach(clinician => {
         const spec = clinician.specialty || 'Unspecified';
         specialtyCount[spec] = (specialtyCount[spec] || 0) + 1;
@@ -277,7 +1029,7 @@ function renderTINAnalysis() {
         }
         specialtyClinicians[spec].push(clinician);
     });
-    
+
     // Update TIN overview cards
     document.getElementById('tin-total').textContent = clinicians.length;
     document.getElementById('tin-specialties').textContent = Object.keys(specialtyCount).length;
@@ -291,8 +1043,7 @@ function renderTINAnalysis() {
     });
     document.getElementById('tin-mvps').textContent = recommendedMVPs.size;
     
-    // Render specialty cards
-    const specialtyGrid = document.getElementById('specialty-grid');
+    // Render specialty cards (specialtyGrid already declared above)
     specialtyGrid.innerHTML = '';
     
     // Sort specialties by count (descending)
@@ -362,80 +1113,124 @@ function updateTINNumber(value) {
     document.getElementById('tin-number-input').value = value;
 }
 
-// Multi-TIN Support Functions
-function saveTINSpecificData() {
-    // Save current TIN's data to localStorage
-    const tinData = {
-        assignments: assignments,
-        selections: mvpSelections,
-        performance: mvpPerformance,
-        measureEstimates: measureEstimates,
-        selectedClinicians: Array.from(selectedClinicians),
-        selectedSpecialties: Array.from(selectedSpecialties),
-        timestamp: new Date().toISOString()
-    };
+// ============================================================================
+// ORGANIZATION (TIN) MANAGEMENT FUNCTIONS
+// ============================================================================
 
-    localStorage.setItem(`${currentTIN}_assignments`, JSON.stringify(assignments));
-    localStorage.setItem(`${currentTIN}_selections`, JSON.stringify(mvpSelections));
-    localStorage.setItem(`${currentTIN}_performance`, JSON.stringify(mvpPerformance));
-    localStorage.setItem(`${currentTIN}_measureEstimates`, JSON.stringify(measureEstimates));
+// Show save indicator
+function showSaveIndicator(status) {
+    const indicator = document.getElementById('save-indicator');
+    if (!indicator) return;
 
-    console.log(`Saved data for TIN: ${currentTIN}`);
+    indicator.style.display = 'inline-block';
+    indicator.className = 'save-indicator ' + status;
+
+    if (status === 'saving') {
+        indicator.textContent = 'Saving...';
+    } else if (status === 'saved') {
+        indicator.textContent = 'Saved';
+        setTimeout(() => {
+            indicator.style.display = 'none';
+        }, 2000);
+    } else if (status === 'error') {
+        indicator.textContent = 'Save failed';
+        setTimeout(() => {
+            indicator.style.display = 'none';
+        }, 3000);
+    }
 }
 
-function loadTINSpecificData() {
-    // Load current TIN's data from localStorage
+// Auto-save with debounce
+function triggerAutoSave() {
+    if (saveTimeout) clearTimeout(saveTimeout);
+
+    saveTimeout = setTimeout(async () => {
+        await saveCurrentState();
+    }, 1000);
+}
+
+// Save current state to Supabase
+async function saveCurrentState() {
+    if (!currentOrganization || !currentUser) return;
+
+    showSaveIndicator('saving');
+    isSaving = true;
+
     try {
-        const savedAssignments = localStorage.getItem(`${currentTIN}_assignments`);
-        const savedSelections = localStorage.getItem(`${currentTIN}_selections`);
-        const savedPerformance = localStorage.getItem(`${currentTIN}_performance`);
-        const savedEstimates = localStorage.getItem(`${currentTIN}_measureEstimates`);
+        // Save assignments
+        await window.db.saveAllAssignments(
+            currentOrganization.id,
+            assignments,
+            currentUser.id
+        );
 
-        assignments = savedAssignments ? JSON.parse(savedAssignments) : {};
-        mvpSelections = savedSelections ? JSON.parse(savedSelections) : {};
-        mvpPerformance = savedPerformance ? JSON.parse(savedPerformance) : {};
-        measureEstimates = savedEstimates ? JSON.parse(savedEstimates) : {};
+        // Save selections
+        await window.db.saveAllMvpSelections(
+            currentOrganization.id,
+            mvpSelections,
+            currentUser.id
+        );
 
-        console.log(`Loaded data for TIN: ${currentTIN}`);
-        console.log(`Assignments: ${Object.keys(assignments).length} MVPs`);
-    } catch (e) {
-        console.error('Error loading TIN-specific data:', e);
-        assignments = {};
-        mvpSelections = {};
-        mvpPerformance = {};
-        measureEstimates = {};
+        // Save estimates
+        await window.db.saveAllMeasureEstimates(
+            currentOrganization.id,
+            measureEstimates,
+            currentUser.id
+        );
+
+        showSaveIndicator('saved');
+        console.log('State saved successfully');
+    } catch (error) {
+        console.error('Error saving state:', error);
+        showSaveIndicator('error');
+    } finally {
+        isSaving = false;
+    }
+}
+
+// Legacy function name - calls saveCurrentState for backward compatibility
+function saveTINSpecificData() {
+    // Only save if we have an org and user
+    if (currentOrganization && currentUser) {
+        saveCurrentState();
     }
 }
 
 function updateTINSelectorUI() {
-    const tinName = currentTIN === 'main' ? 'Memorial Main Campus' : 'Memorial Medical Group';
-    const selectorEl = document.getElementById('tin-selector');
     const indicatorEl = document.getElementById('tin-active-indicator');
 
-    if (selectorEl) {
-        selectorEl.value = currentTIN;
-    }
-    if (indicatorEl) {
-        indicatorEl.textContent = `Currently viewing: ${tinName}`;
+    if (indicatorEl && currentOrganization) {
+        indicatorEl.textContent = `TIN: ${currentOrganization.tin || 'Not set'}`;
     }
 
-    console.log('TIN Selector UI updated to:', currentTIN);
+    // Update TIN number display
+    if (currentOrganization) {
+        globalTINNumber = currentOrganization.tin || '';
+        const tinNumberEl = document.getElementById('tin-number');
+        const tinInputEl = document.getElementById('tin-number-input');
+        if (tinNumberEl) tinNumberEl.textContent = globalTINNumber;
+        if (tinInputEl) tinInputEl.value = globalTINNumber;
+    }
+
+    console.log('TIN Selector UI updated');
 }
 
-async function switchTIN(newTIN) {
-    if (newTIN === currentTIN) {
-        console.log('Already on this TIN');
+// Switch to different organization
+async function switchTIN(newOrgId) {
+    if (!newOrgId || newOrgId === currentOrganization?.id) {
+        console.log('Already on this organization or no org selected');
         return;
     }
 
-    console.log(`Switching from ${currentTIN} to ${newTIN}`);
+    console.log(`Switching to organization: ${newOrgId}`);
 
-    // Save current TIN's data
-    saveTINSpecificData();
+    // Unsubscribe from current org's real-time updates
+    window.db.unsubscribeAll();
 
-    // Update current TIN
-    currentTIN = newTIN;
-    localStorage.setItem('mvp_current_tin', currentTIN);
+    // Update current organization
+    currentOrganization = organizations.find(o => o.id === newOrgId);
+    currentTIN = newOrgId;
+    localStorage.setItem('mvp_current_org', newOrgId);
 
     // Clear current state
     selectedClinicians.clear();
@@ -444,21 +1239,31 @@ async function switchTIN(newTIN) {
 
     // Show loading indicator
     const statusEl = document.getElementById('connection-status');
-    statusEl.textContent = `Switching to ${newTIN === 'main' ? 'Memorial Main Campus' : 'Memorial Medical Group'}...`;
+    statusEl.textContent = `Switching to ${currentOrganization?.name || 'organization'}...`;
     statusEl.className = 'status-loading';
     statusEl.style.display = 'block';
 
     try {
-        // Reload clinicians for new TIN
-        await loadData();
+        // Load new organization's data
+        await loadOrganizationData();
 
-        // Load new TIN's saved data
-        loadTINSpecificData();
+        // Subscribe to new org's real-time updates
+        setupRealtimeSubscriptions();
 
-        // Reload scenarios for new TIN
-        loadSavedScenarios();
+        // Update user presence
+        if (currentUser) {
+            await window.db.updateUserPresence(
+                currentUser.id,
+                currentOrganization.id,
+                currentUser.display_name,
+                currentMode
+            );
 
-        // Rebuild specialty filters for new TIN's clinicians
+            activeUsers = await window.db.getActiveUsers(currentOrganization.id);
+            updateActiveUsersDisplay();
+        }
+
+        // Rebuild specialty filters
         setupFilters();
 
         // Update UI
@@ -477,26 +1282,259 @@ async function switchTIN(newTIN) {
 
         updateStats();
 
-        const tinName = newTIN === 'main' ? 'Memorial Main Campus' : 'Memorial Medical Group';
-        statusEl.textContent = `Switched to ${tinName}`;
+        statusEl.textContent = `Switched to ${currentOrganization?.name}`;
         statusEl.className = 'status-success';
         setTimeout(() => {
             statusEl.style.display = 'none';
         }, 2000);
 
     } catch (error) {
-        console.error('Error switching TIN:', error);
-        statusEl.textContent = `Error switching TIN: ${error.message}`;
+        console.error('Error switching organization:', error);
+        statusEl.textContent = `Error: ${error.message}`;
         statusEl.className = 'status-error';
     }
 }
 
-function createSubgroups() {
+// Open TIN modal
+function openTinModal() {
+    const modal = document.getElementById('tin-modal');
+    if (modal) {
+        modal.classList.add('show');
+
+        // Clear inputs
+        document.getElementById('new-tin-number').value = '';
+        document.getElementById('new-tin-name').value = '';
+        document.getElementById('new-tin-display').value = '';
+    }
+}
+
+// Close TIN modal
+function closeTinModal() {
+    const modal = document.getElementById('tin-modal');
+    if (modal) {
+        modal.classList.remove('show');
+    }
+}
+
+// Save new TIN/Organization
+async function saveNewTin() {
+    const tinNumber = document.getElementById('new-tin-number').value.trim();
+    const tinName = document.getElementById('new-tin-name').value.trim();
+    const displayName = document.getElementById('new-tin-display').value.trim();
+
+    if (!tinNumber || !tinName) {
+        alert('Please enter a TIN number and organization name');
+        return;
+    }
+
+    const statusEl = document.getElementById('connection-status');
+    statusEl.textContent = 'Creating organization...';
+    statusEl.className = 'status-loading';
+    statusEl.style.display = 'block';
+
+    try {
+        const newOrg = await window.db.createOrganization(
+            tinNumber,
+            tinName,
+            displayName || tinName,
+            currentUser?.id
+        );
+
+        // Add current user as member
+        if (currentUser) {
+            await window.db.addOrganizationMember(newOrg.id, currentUser.id, 'admin');
+        }
+
+        // Reload organizations
+        await loadOrganizations();
+
+        // Switch to new organization
+        await switchTIN(newOrg.id);
+
+        closeTinModal();
+
+        statusEl.textContent = `Created ${tinName}!`;
+        statusEl.className = 'status-success';
+        setTimeout(() => {
+            statusEl.style.display = 'none';
+        }, 2000);
+
+    } catch (error) {
+        console.error('Error creating organization:', error);
+        statusEl.textContent = `Error: ${error.message}`;
+        statusEl.className = 'status-error';
+    }
+}
+
+// Delete current TIN/Organization
+async function deleteCurrentTin() {
+    if (!currentOrganization) {
+        alert('No organization selected');
+        return;
+    }
+
+    const confirmMsg = `Are you sure you want to delete "${currentOrganization.display_name || currentOrganization.name}"?\n\nThis will permanently delete:\n- All clinicians\n- All assignments\n- All scenarios\n- All version history\n\nThis action cannot be undone!`;
+
+    if (!confirm(confirmMsg)) {
+        return;
+    }
+
+    // Double-check with the org name
+    const typedName = prompt(`To confirm deletion, type the organization name: "${currentOrganization.name}"`);
+    if (typedName !== currentOrganization.name) {
+        alert('Organization name did not match. Deletion cancelled.');
+        return;
+    }
+
+    const statusEl = document.getElementById('connection-status');
+    statusEl.textContent = 'Deleting organization...';
+    statusEl.className = 'status-loading';
+    statusEl.style.display = 'block';
+
+    try {
+        await window.db.deleteOrganization(currentOrganization.id);
+
+        // Clear localStorage reference
+        localStorage.removeItem('mvp_current_org');
+
+        // Reload organizations
+        await loadOrganizations();
+
+        // If there are remaining orgs, switch to the first one
+        if (organizations.length > 0) {
+            await switchTIN(organizations[0].id);
+        } else {
+            currentOrganization = null;
+            currentTIN = null;
+            clinicians = [];
+            assignments = {};
+            mvpSelections = {};
+            renderTINAnalysis();
+        }
+
+        statusEl.textContent = 'Organization deleted';
+        statusEl.className = 'status-success';
+        setTimeout(() => {
+            statusEl.style.display = 'none';
+        }, 2000);
+
+    } catch (error) {
+        console.error('Error deleting organization:', error);
+        statusEl.textContent = `Error: ${error.message}`;
+        statusEl.className = 'status-error';
+    }
+}
+
+// Open history modal
+function openHistoryModal() {
+    if (!currentOrganization) {
+        alert('Please select an organization first');
+        return;
+    }
+
+    const modal = document.getElementById('history-modal');
+    const body = document.getElementById('history-modal-body');
+
+    if (modal && body) {
+        modal.style.display = 'block';
+        body.innerHTML = '<p>Loading version history...</p>';
+
+        window.db.getVersionHistory(currentOrganization.id).then(history => {
+            if (history.length === 0) {
+                body.innerHTML = '<p style="color: #586069;">No version history yet. History is created when you save scenarios.</p>';
+                return;
+            }
+
+            let html = '<div style="max-height: 400px; overflow-y: auto;">';
+            history.forEach((version, index) => {
+                const date = new Date(version.created_at).toLocaleString();
+                html += `
+                    <div style="padding: 15px; margin-bottom: 10px; background: #f6f8fa; border-left: 3px solid #004877;">
+                        <strong>Version ${version.version_number || history.length - index}</strong>
+                        <div style="font-size: 12px; color: #586069; margin: 5px 0;">
+                            ${date} ${version.trigger_event ? `- ${version.trigger_event}` : ''}
+                        </div>
+                        ${version.version_name ? `<div style="margin: 5px 0;">${version.version_name}</div>` : ''}
+                        ${version.description ? `<div style="font-size: 13px; color: #586069;">${version.description}</div>` : ''}
+                        <button onclick="rollbackToVersion('${version.id}')" style="margin-top: 10px; padding: 6px 12px; background: #586069; color: white; border: none; cursor: pointer; font-size: 12px;">
+                            Restore This Version
+                        </button>
+                    </div>
+                `;
+            });
+            html += '</div>';
+            body.innerHTML = html;
+        }).catch(error => {
+            body.innerHTML = `<p style="color: #dc3545;">Error loading history: ${error.message}</p>`;
+        });
+    }
+}
+
+// Close history modal
+function closeHistoryModal() {
+    const modal = document.getElementById('history-modal');
+    if (modal) {
+        modal.style.display = 'none';
+    }
+}
+
+// Rollback to a version
+async function rollbackToVersion(versionId) {
+    if (!confirm('Are you sure you want to restore this version? Current changes will be lost.')) {
+        return;
+    }
+
+    const statusEl = document.getElementById('connection-status');
+    statusEl.textContent = 'Restoring version...';
+    statusEl.className = 'status-loading';
+    statusEl.style.display = 'block';
+
+    try {
+        const restoredState = await window.db.rollbackToVersion(currentOrganization.id, versionId, currentUser?.id);
+
+        // Apply restored state
+        if (restoredState.assignments_snapshot) {
+            assignments = restoredState.assignments_snapshot;
+        }
+        if (restoredState.selections_snapshot) {
+            mvpSelections = restoredState.selections_snapshot;
+        }
+        if (restoredState.estimates_snapshot) {
+            measureEstimates = restoredState.estimates_snapshot;
+        }
+
+        // Save restored state to database
+        await saveCurrentState();
+
+        // Refresh UI
+        if (currentMode === 'planning') {
+            renderPlanningMode();
+        } else if (currentMode === 'performance') {
+            renderPerformanceEstimation();
+        }
+        updateStats();
+
+        closeHistoryModal();
+
+        statusEl.textContent = 'Version restored!';
+        statusEl.className = 'status-success';
+        setTimeout(() => {
+            statusEl.style.display = 'none';
+        }, 2000);
+
+    } catch (error) {
+        console.error('Error restoring version:', error);
+        statusEl.textContent = `Error: ${error.message}`;
+        statusEl.className = 'status-error';
+    }
+}
+
+async function createSubgroups() {
     if (selectedSpecialties.size === 0) {
         alert('Please select at least one specialty to create subgroups');
         return;
     }
-    
+
     // Create MVP assignments for selected specialties
     selectedSpecialties.forEach(specialty => {
         const recommendedMVP = mvpRecommendations[specialty];
@@ -522,6 +1560,9 @@ function createSubgroups() {
 
     // Rebuild filters after creating assignments
     setupFilters();
+
+    // Save to Supabase
+    triggerAutoSave();
 
     // Switch to planning mode
     switchToMode('planning');
@@ -613,19 +1654,22 @@ function renderPerformanceEstimation() {
 function updateMeasureEstimate(mvpId, measureId, value) {
     const key = `${mvpId}_${measureId}`;
     measureEstimates[key] = parseFloat(value) || 0;
-    
+
     // Calculate score using proper decile calculation
     const selections = mvpSelections[mvpId];
     const config = selections?.configs[measureId] || {};
     const decileInfo = calculateDecile(measureId, config.collectionType || 'MIPS CQM', parseFloat(value) || 0);
-    
+
     const scoreEl = document.getElementById(`score-${mvpId}-${measureId}`);
     if (scoreEl) {
         scoreEl.textContent = `${decileInfo.points.toFixed(1)} pts`;
     }
-    
+
     // Update MVP total score (sum, not average)
     updateMVPTotalScore(mvpId);
+
+    // Auto-save to Supabase
+    triggerAutoSave();
 }
 
 // CORRECT calculateDecile function from original
@@ -901,44 +1945,44 @@ function renderExecutiveDashboard() {
     
     // Initialize yearly tracking
     const yearMVPs = {
-        2025: { all: new Set(), new: new Set() },
         2026: { all: new Set(), new: new Set() },
         2027: { all: new Set(), new: new Set() },
         2028: { all: new Set(), new: new Set() },
-        2029: { all: new Set(), new: new Set() }
+        2029: { all: new Set(), new: new Set() },
+        2030: { all: new Set(), new: new Set() }
     };
-    
+
     const yearMeasures = {
-        2025: { new: [], improve: [] },
         2026: { new: [], improve: [] },
         2027: { new: [], improve: [] },
         2028: { new: [], improve: [] },
-        2029: { new: [], improve: [] }
+        2029: { new: [], improve: [] },
+        2030: { new: [], improve: [] }
     };
-    
-    const years = [2025, 2026, 2027, 2028, 2029];
-    
+
+    const years = [2026, 2027, 2028, 2029, 2030];
+
     // Track when each MVP is introduced
     const mvpIntroductionYear = {};
-    
+
     // Strategy: Distribute MVPs more evenly
-    // Year 2025: Quick wins (0 setup MVPs) + 1-2 easy MVPs
-    // Year 2026: 1-2 medium complexity MVPs  
-    // Year 2027: Continue adding MVPs if any remain
-    // Year 2028: Final MVPs if any
-    // Year 2029: Pure optimization (no new MVPs)
-    
+    // Year 2026: Quick wins (0 setup MVPs) + 1-2 easy MVPs
+    // Year 2027: 1-2 medium complexity MVPs
+    // Year 2028: Continue adding MVPs if any remain
+    // Year 2029: Final MVPs if any
+    // Year 2030: Pure optimization (no new MVPs)
+
     let mvpIndex = 0;
-    
-    // Phase 1: Add MVPs with all measures already activated to 2025
+
+    // Phase 1: Add MVPs with all measures already activated to 2026
     mvpData.forEach(mvp => {
         if (mvp.totalSetupMonths === 0 && mvp.newMeasureCount === 0) {
-            mvpIntroductionYear[mvp.mvpId] = 2025;
-            yearMVPs[2025].new.add(mvp.mvpId);
-            
+            mvpIntroductionYear[mvp.mvpId] = 2026;
+            yearMVPs[2026].new.add(mvp.mvpId);
+
             // Add all its measures as "improve" measures
             mvp.measureDetails.forEach(m => {
-                yearMeasures[2025].improve.push({
+                yearMeasures[2026].improve.push({
                     mvpId: mvp.mvpId,
                     measureId: m.measureId,
                     isActivated: true
@@ -947,25 +1991,25 @@ function renderExecutiveDashboard() {
             mvpIndex++;
         }
     });
-    
-    // Phase 2: Distribute remaining MVPs across 2025-2028 (not 2029!)
+
+    // Phase 2: Distribute remaining MVPs across 2026-2029 (not 2030!)
     // Calculate how many MVPs per year
     const remainingMVPs = mvpData.filter(mvp => !mvpIntroductionYear[mvp.mvpId]);
     const mvpsPerYear = Math.max(1, Math.ceil(remainingMVPs.length / 4)); // Spread over 4 years max
-    
-    let currentYear = 2025;
-    let mvpsAddedThisYear = yearMVPs[2025].new.size; // Count already added MVPs
-    
+
+    let currentYear = 2026;
+    let mvpsAddedThisYear = yearMVPs[2026].new.size; // Count already added MVPs
+
     remainingMVPs.forEach(mvp => {
         // Move to next year if we've added enough MVPs this year
-        if (mvpsAddedThisYear >= mvpsPerYear && currentYear < 2028) {
+        if (mvpsAddedThisYear >= mvpsPerYear && currentYear < 2029) {
             currentYear++;
             mvpsAddedThisYear = 0;
         }
-        
-        // Don't add new MVPs in 2029 - that's optimization year only
-        if (currentYear >= 2029) {
-            currentYear = 2028; // Put any remaining in 2028
+
+        // Don't add new MVPs in 2030 - that's optimization year only
+        if (currentYear >= 2030) {
+            currentYear = 2029; // Put any remaining in 2029
         }
         
         mvpIntroductionYear[mvp.mvpId] = currentYear;
@@ -1039,15 +2083,15 @@ function renderExecutiveDashboard() {
         yearlyPlan[year].improveMeasures = [...new Set(yearMeasures[year].improve.map(item => item.measureId))];
         
         // Update focus based on what's happening that year
-        if (year == 2025) {
+        if (year == 2026) {
             yearlyPlan[year].focus = 'Foundation - Quick wins and high readiness measures';
-        } else if (year == 2026) {
-            yearlyPlan[year].focus = 'Expansion - Add specialty MVPs';
         } else if (year == 2027) {
-            yearlyPlan[year].focus = 'Integration - Cross-specialty coordination';
+            yearlyPlan[year].focus = 'Expansion - Add specialty MVPs';
         } else if (year == 2028) {
-            yearlyPlan[year].focus = 'Optimization - Performance improvement';
+            yearlyPlan[year].focus = 'Integration - Cross-specialty coordination';
         } else if (year == 2029) {
+            yearlyPlan[year].focus = 'Optimization - Performance improvement';
+        } else if (year == 2030) {
             if (yearMVPs[year].new.size === 0) {
                 yearlyPlan[year].focus = 'Excellence - Full optimization and continuous improvement';
             } else {
@@ -1055,8 +2099,8 @@ function renderExecutiveDashboard() {
             }
         }
     });
-    
-    selectYear(2025);
+
+    selectYear(2026);
 }
 
 function selectYear(year) {
@@ -1280,10 +2324,18 @@ function renderEnhancedMeasuresTab(mvp) {
     
     availableMeasureIds.forEach(measureId => {
         const measure = measures.find(m => m.measure_id === measureId);
-        if (!measure) return;
-        
+        if (!measure) {
+            console.warn(`Measure not found: "${measureId}". Available IDs sample:`, measures.slice(0, 5).map(m => m.measure_id));
+            return;
+        }
+
         const isSelected = selections.measures.includes(measureId);
         const isActivated = measure.is_activated === 'Y';
+
+        // Debug log for activated status
+        if (measureId.includes('321') || measureId.includes('CAHPS')) {
+            console.log(`CAHPS measure check - ID: ${measureId}, is_activated: ${measure.is_activated}, isActivated: ${isActivated}`);
+        }
         const config = measureConfigurations[`${mvp.mvp_id}_${measureId}`] || {};
         const availableTypes = measure.collection_types ? 
             measure.collection_types.split(',').map(t => t.trim()) : ['MIPS CQM'];
@@ -1700,21 +2752,21 @@ function filterClinicians() {
 
 function assignSelectedToMVP() {
     const mvpId = document.getElementById('mvp-selector')?.value;
-    
+
     if (!mvpId) {
         alert('Please select an MVP from the dropdown');
         return;
     }
-    
+
     if (selectedClinicians.size === 0) {
         alert('Please select clinicians to assign');
         return;
     }
-    
+
     if (!assignments[mvpId]) {
         assignments[mvpId] = [];
     }
-    
+
     selectedClinicians.forEach(npi => {
         // Remove from any other MVP
         for (let id in assignments) {
@@ -1723,13 +2775,16 @@ function assignSelectedToMVP() {
         // Add to selected MVP
         assignments[mvpId].push(npi);
     });
-    
+
     selectedClinicians.clear();
     setupFilters();
     renderClinicians();
     renderMVPs();
     updateStats();
     filterClinicians();
+
+    // Auto-save to Supabase
+    triggerAutoSave();
 }
 
 function selectMVP(mvpId) {
@@ -1743,14 +2798,14 @@ function removeAllFromMVP(mvpId) {
         delete assignments[mvpId];
         delete mvpSelections[mvpId];
         delete mvpPerformance[mvpId];
-        
+
         // Clear measure configurations for this MVP
         Object.keys(measureConfigurations).forEach(key => {
             if (key.startsWith(mvpId)) {
                 delete measureConfigurations[key];
             }
         });
-        
+
         if (currentMVP === mvpId) {
             currentMVP = null;
         }
@@ -1760,16 +2815,19 @@ function removeAllFromMVP(mvpId) {
         renderMVPs();
         renderDetails();
         updateStats();
+
+        // Auto-save to Supabase
+        triggerAutoSave();
     }
 }
 
 function removeFromMVP(npi, mvpId) {
     assignments[mvpId] = assignments[mvpId].filter(n => n !== npi);
-    
+
     if (assignments[mvpId].length === 0) {
         delete assignments[mvpId];
         delete mvpSelections[mvpId];
-        
+
         if (currentMVP === mvpId) {
             currentMVP = null;
         }
@@ -1780,6 +2838,9 @@ function removeFromMVP(npi, mvpId) {
     renderMVPs();
     renderDetails();
     updateStats();
+
+    // Auto-save to Supabase
+    triggerAutoSave();
 }
 
 function toggleMeasure(mvpId, measureId) {
@@ -1812,60 +2873,109 @@ function toggleMeasure(mvpId, measureId) {
         delete selections.configs[measureId];
         delete measureConfigurations[`${mvpId}_${measureId}`];
     }
-    
+
     renderDetails();
+
+    // Auto-save to Supabase
+    triggerAutoSave();
 }
 
 function setCollectionType(mvpId, measureId, value) {
     if (!mvpSelections[mvpId]) {
         mvpSelections[mvpId] = { measures: [], configs: {} };
     }
-    
+
     if (!mvpSelections[mvpId].configs[measureId]) {
         mvpSelections[mvpId].configs[measureId] = {};
     }
-    
+
     mvpSelections[mvpId].configs[measureId].collectionType = value;
     console.log(`Set ${measureId} to ${value} for MVP ${mvpId}`);
-    
+
     // Re-render to update benchmark display
     renderDetails();
+
+    // Auto-save to Supabase
+    triggerAutoSave();
 }
 
-// Scenario Management
-function saveScenario() {
+// Scenario Management (Supabase-enabled)
+async function saveScenario() {
+    if (!currentOrganization) {
+        alert('Please select an organization first');
+        return;
+    }
+
     // Don't allow saving over Default scenario
     if (currentScenarioName === 'Default') {
         const name = prompt('Default scenario cannot be modified. Enter a name for a new scenario:', 'Scenario ' + (Object.keys(savedScenarios).length + 1));
         if (!name || name.trim() === '') return;
-        
+
         currentScenarioName = name.trim();
-        
+
         // Update dropdown to show new scenario
         updateScenarioDropdown();
-        document.getElementById('scenario-selector').value = currentScenarioName;
+        const selector = document.getElementById('scenario-selector');
+        if (selector) selector.value = currentScenarioName;
     }
-    
-    // Save to current scenario name
-    const scenarioData = {
-        name: currentScenarioName,
-        timestamp: new Date().toISOString(),
-        assignments: assignments,
-        selections: mvpSelections,
-        performance: mvpPerformance,
-        measureEstimates: measureEstimates,
-        measureConfigurations: measureConfigurations,
-        yearlyPlan: yearlyPlan,
-        tinNumber: globalTINNumber
-    };
-    
-    savedScenarios[currentScenarioName] = scenarioData;
-    localStorage.setItem(`${currentTIN}_scenarios`, JSON.stringify(savedScenarios));
 
-    alert(`Scenario "${currentScenarioName}" saved successfully!`);
-    
-    // Refresh the scenario dropdown to show new scenarios
-    updateScenarioDropdown();
+    const statusEl = document.getElementById('connection-status');
+    statusEl.textContent = 'Saving scenario...';
+    statusEl.className = 'status-loading';
+    statusEl.style.display = 'block';
+
+    try {
+        // Save to Supabase
+        const scenarioData = {
+            assignments_snapshot: assignments,
+            selections_snapshot: mvpSelections,
+            estimates_snapshot: measureEstimates,
+            yearly_plan_snapshot: yearlyPlan
+        };
+
+        await window.db.saveScenario(
+            currentOrganization.id,
+            currentScenarioName,
+            `Scenario saved at ${new Date().toLocaleString()}`,
+            scenarioData,
+            currentUser?.id
+        );
+
+        // Also create a version snapshot for history
+        await window.db.createVersionSnapshot(
+            currentOrganization.id,
+            `Scenario: ${currentScenarioName}`,
+            'Saved scenario',
+            {
+                assignments_snapshot: assignments,
+                selections_snapshot: mvpSelections,
+                estimates_snapshot: measureEstimates,
+                yearly_plan_snapshot: yearlyPlan
+            },
+            currentUser?.id,
+            'scenario_save'
+        );
+
+        // Update local cache
+        savedScenarios[currentScenarioName] = {
+            name: currentScenarioName,
+            ...scenarioData
+        };
+
+        statusEl.textContent = `Scenario "${currentScenarioName}" saved!`;
+        statusEl.className = 'status-success';
+        setTimeout(() => {
+            statusEl.style.display = 'none';
+        }, 2000);
+
+        // Refresh the scenario dropdown
+        updateScenarioDropdown();
+
+    } catch (error) {
+        console.error('Error saving scenario:', error);
+        statusEl.textContent = `Error: ${error.message}`;
+        statusEl.className = 'status-error';
+    }
 }
 
 function saveAsNewScenario() {
@@ -1880,15 +2990,24 @@ function saveAsNewScenario() {
     document.getElementById('scenario-selector').value = currentScenarioName;
 }
 
-function loadScenario(name) {
+async function loadScenario(name) {
+    console.log('Loading scenario:', name);
     if (!name || name === '') return;
-    
+
     if (name === 'new') {
         // Create a new blank scenario
         createNewScenario();
         return;
     }
-    
+
+    const defaultYearlyPlan = {
+        2026: { mvps: [], measures: [], focus: 'Foundation - High readiness measures' },
+        2027: { mvps: [], measures: [], focus: 'Expansion - Add specialty MVPs' },
+        2028: { mvps: [], measures: [], focus: 'Integration - Cross-specialty coordination' },
+        2029: { mvps: [], measures: [], focus: 'Optimization - Performance improvement' },
+        2030: { mvps: [], measures: [], focus: 'Excellence - Full MVP implementation' }
+    };
+
     // Default scenario is always blank
     if (name === 'Default') {
         currentScenarioName = 'Default';
@@ -1900,35 +3019,46 @@ function loadScenario(name) {
         selectedClinicians.clear();
         selectedSpecialties.clear();
         currentMVP = null;
-        yearlyPlan = {
-            2025: { mvps: [], measures: [], focus: 'Foundation - High readiness measures' },
-            2026: { mvps: [], measures: [], focus: 'Expansion - Add specialty MVPs' },
-            2027: { mvps: [], measures: [], focus: 'Integration - Cross-specialty coordination' },
-            2028: { mvps: [], measures: [], focus: 'Optimization - Performance improvement' },
-            2029: { mvps: [], measures: [], focus: 'Excellence - Full MVP implementation' }
-        };
+        yearlyPlan = { ...defaultYearlyPlan };
     } else if (savedScenarios[name]) {
         const scenario = savedScenarios[name];
         currentScenarioName = name;
-        assignments = scenario.assignments || {};
-        mvpSelections = scenario.selections || {};
+
+        // Handle both old format (assignments) and new format (assignments_snapshot)
+        assignments = scenario.assignments_snapshot || scenario.assignments || {};
+        mvpSelections = scenario.selections_snapshot || scenario.selections || {};
         mvpPerformance = scenario.performance || {};
-        measureEstimates = scenario.measureEstimates || {};
+        measureEstimates = scenario.estimates_snapshot || scenario.measureEstimates || {};
         measureConfigurations = scenario.measureConfigurations || {};
-        yearlyPlan = scenario.yearlyPlan || {
-            2025: { mvps: [], measures: [], focus: 'Foundation - High readiness measures' },
-            2026: { mvps: [], measures: [], focus: 'Expansion - Add specialty MVPs' },
-            2027: { mvps: [], measures: [], focus: 'Integration - Cross-specialty coordination' },
-            2028: { mvps: [], measures: [], focus: 'Optimization - Performance improvement' },
-            2029: { mvps: [], measures: [], focus: 'Excellence - Full MVP implementation' }
-        };
-        
+        yearlyPlan = scenario.yearly_plan_snapshot || scenario.yearlyPlan || { ...defaultYearlyPlan };
+
         if (scenario.tinNumber) {
             updateTINNumber(scenario.tinNumber);
         }
     } else {
-        alert('Scenario not found');
-        return;
+        // Try to load from Supabase
+        if (currentOrganization) {
+            try {
+                const scenario = await window.db.loadScenario(currentOrganization.id, name);
+                if (scenario) {
+                    currentScenarioName = name;
+                    assignments = scenario.assignments_snapshot || {};
+                    mvpSelections = scenario.selections_snapshot || {};
+                    measureEstimates = scenario.estimates_snapshot || {};
+                    yearlyPlan = scenario.yearly_plan_snapshot || { ...defaultYearlyPlan };
+                } else {
+                    alert('Scenario not found');
+                    return;
+                }
+            } catch (error) {
+                console.error('Error loading scenario:', error);
+                alert('Error loading scenario');
+                return;
+            }
+        } else {
+            alert('Scenario not found');
+            return;
+        }
     }
 
     // Rebuild filters after loading scenario
@@ -1963,13 +3093,13 @@ function createNewScenario() {
     selectedSpecialties.clear();
     currentMVP = null;
     yearlyPlan = {
-        2025: { mvps: [], measures: [], focus: 'Foundation - High readiness measures' },
-        2026: { mvps: [], measures: [], focus: 'Expansion - Add specialty MVPs' },
-        2027: { mvps: [], measures: [], focus: 'Integration - Cross-specialty coordination' },
-        2028: { mvps: [], measures: [], focus: 'Optimization - Performance improvement' },
-        2029: { mvps: [], measures: [], focus: 'Excellence - Full MVP implementation' }
+        2026: { mvps: [], measures: [], focus: 'Foundation - High readiness measures' },
+        2027: { mvps: [], measures: [], focus: 'Expansion - Add specialty MVPs' },
+        2028: { mvps: [], measures: [], focus: 'Integration - Cross-specialty coordination' },
+        2029: { mvps: [], measures: [], focus: 'Optimization - Performance improvement' },
+        2030: { mvps: [], measures: [], focus: 'Excellence - Full MVP implementation' }
     };
-    
+
     // Save the new blank scenario
     saveScenario();
     
@@ -2047,22 +3177,12 @@ function resetScenario() {
 }
 
 function loadSavedScenarios() {
-    const saved = localStorage.getItem(`${currentTIN}_scenarios`);
-    if (saved) {
-        try {
-            savedScenarios = JSON.parse(saved);
-            // Remove any saved Default scenario to ensure it's always blank
-            if (savedScenarios['Default']) {
-                delete savedScenarios['Default'];
-                localStorage.setItem(`${currentTIN}_scenarios`, JSON.stringify(savedScenarios));
-            }
-        } catch (e) {
-            console.error('Error loading saved scenarios:', e);
-            savedScenarios = {};
-        }
-    } else {
-        savedScenarios = {};
+    // Scenarios are now loaded from Supabase in loadOrganizationData()
+    // This function just ensures the Default scenario doesn't exist in the cache
+    if (savedScenarios['Default']) {
+        delete savedScenarios['Default'];
     }
+    console.log(`Loaded ${Object.keys(savedScenarios).length} scenarios from Supabase`);
 }
 
 // Utility functions
@@ -2277,6 +3397,19 @@ window.deleteScenario = deleteScenario;
 window.createNewScenario = createNewScenario;
 window.updateScenarioDropdown = updateScenarioDropdown;
 window.updateTINNumber = updateTINNumber;
+
+// Supabase/User functions
+window.submitUserIdentity = submitUserIdentity;
+window.switchTIN = switchTIN;
+window.openTinModal = openTinModal;
+window.closeTinModal = closeTinModal;
+window.saveNewTin = saveNewTin;
+window.openHistoryModal = openHistoryModal;
+window.closeHistoryModal = closeHistoryModal;
+window.rollbackToVersion = rollbackToVersion;
+window.triggerAutoSave = triggerAutoSave;
+window.importCliniciansFromSheets = importCliniciansFromSheets;
+window.showCSVImportModal = showCSVImportModal;
 
 // Modal functions
 function showMeasureDetails(year, type) {
